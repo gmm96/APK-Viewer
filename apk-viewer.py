@@ -122,6 +122,7 @@ class ScrollableFrame(ttk.Frame):
         elif event.num == 5 or event.delta < 0:
             self.canvas.yview_scroll(1, "units")
 
+
 class ApkAnalyzerApp:
     def __init__(self, root):
         self.root = root
@@ -200,6 +201,7 @@ class ApkAnalyzerApp:
         h_scroll_man.grid(row=1, column=0, sticky="ew")
 
     def load_apk(self):
+        """Abre el explorador de archivos y, si se selecciona algo, lanza el análisis."""
         apk_path = filedialog.askopenfilename(
             title="Select APK file",
             filetypes=[("APK files", "*.apk"), ("All files", "*.*")]
@@ -208,6 +210,8 @@ class ApkAnalyzerApp:
             self.start_analysis(apk_path)
 
     def start_analysis(self, apk_path):
+        """Prepara la interfaz y lanza el hilo de análisis. 
+        Puede ser llamado desde el botón de carga o desde argumentos de terminal."""
         if not os.path.exists(apk_path):
             messagebox.showerror("Error", f"File not found:\n{apk_path}")
             return
@@ -229,37 +233,11 @@ class ApkAnalyzerApp:
         self.root.after(0, lambda: self.lbl_status.config(text=message, foreground=color))
 
     # ==========================================
-    # LÓGICA DE EXTRACCIÓN Y LIMPIEZA
+    # LÓGICA DE EXTRACCIÓN (ANDROGUARD CORE)
     # ==========================================
-    def _clean_apk_bytes(self, apk_path):
-        """
-        Lee el APK, busca el bloque EOCD y recorta cualquier basura final 
-        (padding de zipalign, firmas extra) que corrompa la lectura estricta de python zipfile.
-        """
-        with open(apk_path, 'rb') as f:
-            data = f.read()
-        
-        # Firma mágica del EOCD
-        eocd_magic = b'\x50\x4b\x05\x06'
-        pos = data.rfind(eocd_magic)
-        
-        if pos != -1:
-            if pos + 22 <= len(data):
-                # La longitud del comentario viene en los bytes 20 y 21 del bloque EOCD
-                comment_length = int.from_bytes(data[pos+20:pos+22], byteorder='little')
-                eocd_end = pos + 22 + comment_length
-                
-                # Mutilar basura sobrante
-                if eocd_end < len(data):
-                    return data[:eocd_end]
-        
-        return data
-
     def analyze_apk_thread(self, apk_path):
         try:
-            # Pasamos los bytes limpios a Androguard en vez de la ruta en crudo
-            cleaned_apk_data = self._clean_apk_bytes(apk_path)
-            a = APK(cleaned_apk_data)
+            a = APK(apk_path)
             
             pil_image = self._extract_icon(a)
             data = {
@@ -592,6 +570,7 @@ if __name__ == "__main__":
     app = ApkAnalyzerApp(root)
     
     if len(sys.argv) > 1:
+        # Dar tiempo a que la GUI se dibuje antes de lanzar el análisis CLI
         root.after(100, lambda: app.start_analysis(sys.argv[1]))
     
     root.mainloop()
