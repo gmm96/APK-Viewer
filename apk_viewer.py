@@ -2,9 +2,11 @@ import sys
 import os
 import io
 import threading
+import zipfile
+import re
+from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from tkinter.scrolledtext import ScrolledText
 import xml.dom.minidom as minidom
 
 # ---- ANDROGUARD 4.x API ----
@@ -41,6 +43,8 @@ FONT_MONO_SMALL = ("Consolas", 9)
 COLOR_PLACEHOLDER_BG = '#e0e0e0'
 COLOR_PLACEHOLDER_BORDER = '#cccccc'
 COLOR_TEXT_BG = '#fcfcfc'
+COLOR_MARK_BG = '#cfe3fc'
+COLOR_FOLDER_BG = '#eef3f8'
 
 # Android XML Namespace
 ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
@@ -126,15 +130,25 @@ class ScrollableFrame(ttk.Frame):
 class ApkAnalyzerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Androguard APK Analyzer")
+        self.root.title("APKViewer")
         self.root.geometry("1000x750")
-        
+
         style = ttk.Style()
         style.theme_use('clam')
         
+        # Configurar padding global y forzarlo explícitamente en el mapa de estados para la pestaña seleccionada
+        style.configure('TNotebook.Tab', padding=(20, 2))
+        style.map('TNotebook.Tab', padding=[('selected', (20, 3))])
+        
         self.placeholder_icon = self._create_placeholder()
         self.current_icon = None
+        self.current_files_tree = {}
         
+        # --- Menú Contextual (Copiar) ---
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="Copy Text", command=self._copy_text)
+        self.active_text_widget = None
+
         self.create_widgets()
 
     def _create_placeholder(self):
@@ -190,7 +204,7 @@ class ApkAnalyzerApp:
         self.tab_manifest.rowconfigure(0, weight=1)
         self.tab_manifest.columnconfigure(0, weight=1)
         
-        self.txt_manifest = tk.Text(self.tab_manifest, wrap=tk.NONE, font=FONT_MONO, borderwidth=0)
+        self.txt_manifest = tk.Text(self.tab_manifest, wrap=tk.NONE, font=FONT_MONO, borderwidth=0, bg=COLOR_TEXT_BG)
         v_scroll_man = ttk.Scrollbar(self.tab_manifest, orient="vertical", command=self.txt_manifest.yview)
         h_scroll_man = ttk.Scrollbar(self.tab_manifest, orient="horizontal", command=self.txt_manifest.xview)
         
@@ -199,9 +213,68 @@ class ApkAnalyzerApp:
         self.txt_manifest.grid(row=0, column=0, sticky="nsew")
         v_scroll_man.grid(row=0, column=1, sticky="ns")
         h_scroll_man.grid(row=1, column=0, sticky="ew")
+        
+        # Enlazar menú contextual al Manifest
+        self.txt_manifest.bind("<Button-3>", self._show_context_menu)
+
+        # --- Pestaña Files (listado jerárquico del APK) ---
+        self.tab_files = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_files, text="Files")
+
+        # Configurar pesos de fila para que la tabla ocupe todo el espacio y el buscador se quede abajo
+        self.tab_files.rowconfigure(0, weight=1)
+        self.tab_files.rowconfigure(1, weight=0)
+        self.tab_files.rowconfigure(2, weight=0)
+        self.tab_files.columnconfigure(0, weight=1)
+
+        files_columns = ("type", "size", "compressed", "modified")
+        self.tree_files = ttk.Treeview(self.tab_files, columns=files_columns, show="tree headings")
+
+        # Alineación a la izquierda generalizada
+        self.tree_files.heading("#0", text="Name", anchor="w")
+        self.tree_files.column("#0", width=380, minwidth=200, stretch=True, anchor="w")
+
+        self.tree_files.heading("type", text="Type", anchor="w")
+        self.tree_files.column("type", width=120, minwidth=80, stretch=False, anchor="w")
+
+        self.tree_files.heading("size", text="Size", anchor="w")
+        self.tree_files.column("size", width=100, minwidth=70, stretch=False, anchor="w")
+
+        self.tree_files.heading("compressed", text="Compressed", anchor="w")
+        self.tree_files.column("compressed", width=100, minwidth=70, stretch=False, anchor="w")
+
+        self.tree_files.heading("modified", text="Modified", anchor="w")
+        self.tree_files.column("modified", width=150, minwidth=130, stretch=False, anchor="w")
+
+        v_scroll_files = ttk.Scrollbar(self.tab_files, orient="vertical", command=self.tree_files.yview)
+        h_scroll_files = ttk.Scrollbar(self.tab_files, orient="horizontal", command=self.tree_files.xview)
+        
+        # Función para ocultar el scroll horizontal automáticamente
+        def auto_hide_files_h_scroll(first, last):
+            if float(first) <= 0.0 and float(last) >= 1.0:
+                h_scroll_files.grid_remove()
+            else:
+                h_scroll_files.grid(row=1, column=0, sticky="ew")
+            h_scroll_files.set(first, last)
+
+        self.tree_files.configure(yscrollcommand=v_scroll_files.set, xscrollcommand=auto_hide_files_h_scroll)
+
+        self.tree_files.grid(row=0, column=0, sticky="nsew")
+        v_scroll_files.grid(row=0, column=1, sticky="ns")
+
+        # Se quita la fuente bold en carpetas
+        self.tree_files.tag_configure("folder", background=COLOR_FOLDER_BG, font=FONT_MONO_SMALL)
+        self.tree_files.tag_configure("file", font=FONT_MONO_SMALL)
+
+        # Buscador / Filtro movido a la parte inferior (fila 2)
+        filter_frame = ttk.Frame(self.tab_files)
+        filter_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        ttk.Label(filter_frame, text="Filter:").pack(side=tk.LEFT)
+        self.entry_filter = ttk.Entry(filter_frame)
+        self.entry_filter.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.entry_filter.bind("<KeyRelease>", self._apply_file_filter)
 
     def load_apk(self):
-        """Abre el explorador de archivos y, si se selecciona algo, lanza el análisis."""
         apk_path = filedialog.askopenfilename(
             title="Select APK file",
             filetypes=[("APK files", "*.apk"), ("All files", "*.*")]
@@ -210,8 +283,6 @@ class ApkAnalyzerApp:
             self.start_analysis(apk_path)
 
     def start_analysis(self, apk_path):
-        """Prepara la interfaz y lanza el hilo de análisis. 
-        Puede ser llamado desde el botón de carga o desde argumentos de terminal."""
         if not os.path.exists(apk_path):
             messagebox.showerror("Error", f"File not found:\n{apk_path}")
             return
@@ -222,10 +293,13 @@ class ApkAnalyzerApp:
         self.lbl_app_name.config(text="Analyzing APK...")
         self.lbl_app_package.config(text=os.path.basename(apk_path))
         self.current_icon = None
+        self.entry_filter.delete(0, tk.END)
         
         for widget in self.scroll_frame.inner_frame.winfo_children():
             widget.destroy()
+        self.txt_manifest.configure(state="normal")
         self.txt_manifest.delete(1.0, tk.END)
+        self.tree_files.delete(*self.tree_files.get_children())
 
         threading.Thread(target=self.analyze_apk_thread, args=(apk_path,), daemon=True).start()
 
@@ -247,6 +321,7 @@ class ApkAnalyzerApp:
                 'Extras & Libraries': self._get_trackers_and_libs(a)
             }
             manifest_xml = self._format_manifest(a)
+            self.current_files_tree = self._build_files_tree(apk_path)
             
             self.root.after(0, lambda: self.render_gui(data, manifest_xml, pil_image))
             self._set_status("Analysis completed successfully.", "green")
@@ -392,7 +467,7 @@ class ApkAnalyzerApp:
             'Services': sorted(a.get_services()),
             'Receivers': sorted(a.get_receivers()),
             'Providers': sorted(a.get_providers()),
-            'Public Intent Actions': sorted(list(intent_actions))
+            'Intent Actions': sorted(list(intent_actions))
         }
 
     def _get_trackers_and_libs(self, a):
@@ -411,8 +486,8 @@ class ApkAnalyzerApp:
         
         return {
             'Hardware Features': a.get_features(),
-            'Native Libraries (.so)': a.get_libraries(),
-            'Trackers Detectados': sorted(list(set(trackers)))
+            'Libraries': a.get_libraries(),
+            'Trackers': sorted(list(set(trackers)))
         }
 
     def _format_manifest(self, a):
@@ -425,6 +500,131 @@ class ApkAnalyzerApp:
             return os.linesep.join([s for s in pretty.splitlines() if s.strip()])
         except Exception as e:
             return f"Error processing Manifest:\n{str(e)}"
+
+    def _build_files_tree(self, apk_path):
+        root_node = {}
+        try:
+            with zipfile.ZipFile(apk_path, 'r') as zf:
+                for info in zf.infolist():
+                    if info.is_dir() or not info.filename:
+                        continue
+                    parts = [p for p in info.filename.split('/') if p]
+                    if not parts:
+                        continue
+                    node = root_node
+                    for i, part in enumerate(parts):
+                        is_last = (i == len(parts) - 1)
+                        if part not in node:
+                            node[part] = {'__children__': {}, '__is_file__': False, '__size__': 0}
+                        if is_last:
+                            try:
+                                mtime = datetime(*info.date_time)
+                                mtime_str = mtime.strftime("%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                mtime_str = ""
+                            node[part]['__is_file__'] = True
+                            node[part]['__size__'] = info.file_size
+                            node[part]['__compressed__'] = info.compress_size
+                            node[part]['__modified__'] = mtime_str
+                        node = node[part]['__children__']
+        except Exception:
+            pass
+
+        self._aggregate_folder_sizes(root_node)
+        return root_node
+
+    def _aggregate_folder_sizes(self, node_dict):
+        """Suma recursivamente tamaño y tamaño compreso, y busca la última fecha modificada"""
+        total_size = 0
+        total_compressed = 0
+        latest_modified = ""
+
+        for meta in node_dict.values():
+            if meta.get('__is_file__'):
+                total_size += meta.get('__size__', 0)
+                total_compressed += meta.get('__compressed__', 0)
+                mtime = meta.get('__modified__', "")
+                if mtime > latest_modified:
+                    latest_modified = mtime
+            else:
+                folder_size, folder_comp, folder_mod = self._aggregate_folder_sizes(meta.get('__children__', {}))
+                meta['__size__'] = folder_size
+                meta['__compressed__'] = folder_comp
+                meta['__modified__'] = folder_mod
+                
+                total_size += folder_size
+                total_compressed += folder_comp
+                if folder_mod > latest_modified:
+                    latest_modified = folder_mod
+                    
+        return total_size, total_compressed, latest_modified
+
+    @staticmethod
+    def _human_size(num_bytes):
+        try:
+            num = float(num_bytes)
+        except (TypeError, ValueError):
+            return "-"
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if num < 1024.0:
+                return f"{num:.0f} {unit}" if unit == 'B' else f"{num:.1f} {unit}"
+            num /= 1024.0
+        return f"{num:.1f} TB"
+
+    def _apply_file_filter(self, event=None):
+        query = self.entry_filter.get().strip().lower()
+        self.tree_files.delete(*self.tree_files.get_children())
+        
+        if not query:
+            self._populate_files_tree(self.current_files_tree)
+            return
+            
+        filtered_tree = self._filter_tree_recursive(self.current_files_tree, query)
+        self._populate_files_tree(filtered_tree)
+
+    def _filter_tree_recursive(self, node_dict, query, force_include=False):
+        filtered = {}
+        for name, meta in node_dict.items():
+            matches_name = query in name.lower()
+            should_include = force_include or matches_name
+            
+            if meta.get('__is_file__'):
+                if should_include:
+                    filtered[name] = meta
+            else:
+                children = self._filter_tree_recursive(meta.get('__children__', {}), query, should_include)
+                if children or should_include:
+                    new_meta = meta.copy()
+                    new_meta['__children__'] = children
+                    filtered[name] = new_meta
+        return filtered
+
+    def _populate_files_tree(self, node_dict, parent_iid=""):
+        entries = sorted(
+            node_dict.items(),
+            key=lambda kv: (kv[1].get('__is_file__', False), kv[0].lower())
+        )
+        for name, meta in entries:
+            is_file = meta.get('__is_file__', False)
+            size_str = self._human_size(meta.get('__size__', 0))
+            compressed_str = self._human_size(meta.get('__compressed__', 0))
+            modified_str = meta.get('__modified__', "")
+
+            if is_file:
+                ext = os.path.splitext(name)[1].lstrip('.').upper() + " File" or "File"
+                self.tree_files.insert(
+                    parent_iid, tk.END, text=f" 📄 {name}",
+                    values=(ext, size_str, compressed_str, modified_str),
+                    tags=('file',)
+                )
+            else:
+                child_count = len(meta.get('__children__', {}))
+                iid = self.tree_files.insert(
+                    parent_iid, tk.END, text=f" 📁 {name}",
+                    values=(f"Directory ({child_count})", size_str, compressed_str, modified_str),
+                    open=True, tags=('folder',)
+                )
+                self._populate_files_tree(meta.get('__children__', {}), iid)
 
     # ==========================================
     # LÓGICA DE RENDERIZADO UI E INTERACTIVIDAD
@@ -447,12 +647,47 @@ class ApkAnalyzerApp:
             for inner_row, (label, value) in enumerate(fields.items()):
                 if isinstance(value, list):
                     txt_widget = self._create_text_list_field(frame, inner_row, label, value)
-                    if label == 'Public Intent Actions':
+                    if label == 'Intent Actions':
                         txt_widget.bind("<Double-Button-1>", self._on_intent_double_click)
                 else:
                     self._create_entry_field(frame, inner_row, label, value)
 
+        self.txt_manifest.configure(state="normal")
         self.txt_manifest.insert(tk.END, manifest_xml)
+        self._highlight_xml(self.txt_manifest)
+        self.txt_manifest.configure(state="disabled")
+
+        self._apply_file_filter()
+
+    def _highlight_xml(self, txt_widget):
+        """Sintaxis highlighting básico estilo VS Code para XML."""
+        content = txt_widget.get("1.0", tk.END)
+        
+        txt_widget.tag_configure("xml_tag", foreground="#800000") # Marrón
+        txt_widget.tag_configure("xml_attr", foreground="#FF0000") # Rojo
+        txt_widget.tag_configure("xml_value", foreground="#0000FF") # Azul
+        txt_widget.tag_configure("xml_comment", foreground="#008000", font=FONT_MONO_SMALL + ("italic",)) # Verde
+        
+        for match in re.finditer(r'<[^>]+>', content):
+            start = f"1.0 + {match.start()} chars"
+            end = f"1.0 + {match.end()} chars"
+            txt_widget.tag_add("xml_tag", start, end)
+            
+            tag_str = match.group()
+            for amatch in re.finditer(r'([a-zA-Z0-9_:-]+)\s*=\s*("[^"]*"|\'[^\']*\')', tag_str):
+                a_start = match.start() + amatch.start(1)
+                a_end = match.start() + amatch.end(1)
+                v_start = match.start() + amatch.start(2)
+                v_end = match.start() + amatch.end(2)
+                
+                txt_widget.tag_add("xml_attr", f"1.0 + {a_start} chars", f"1.0 + {a_end} chars")
+                txt_widget.tag_add("xml_value", f"1.0 + {v_start} chars", f"1.0 + {v_end} chars")
+                
+        for match in re.finditer(r'<!--.*?-->', content, re.DOTALL):
+            start = f"1.0 + {match.start()} chars"
+            end = f"1.0 + {match.end()} chars"
+            txt_widget.tag_add("xml_comment", start, end)
+            txt_widget.tag_raise("xml_comment")
 
     def _create_entry_field(self, parent, row, label_text, value):
         ttk.Label(parent, text=label_text, width=25).grid(row=row, column=0, sticky="w", padx=10, pady=5)
@@ -493,9 +728,55 @@ class ApkAnalyzerApp:
         txt.grid(row=0, column=0, sticky="ew")
         
         txt.insert(tk.END, display_text)
-        txt.configure(state="disabled") 
+        txt.configure(state="disabled")
+
+        txt.tag_configure("marked_line", background=COLOR_MARK_BG)
         
+        # Lógica no invasiva para la selección.
+        # Desmarca al pulsar (para limpiezas) y marca al soltar SÓLO si no se ha arrastrado una selección.
+        txt.bind("<Button-1>", lambda e: e.widget.tag_remove("marked_line", "1.0", tk.END))
+        txt.bind("<ButtonRelease-1>", self._on_line_click)
+        txt.bind("<Button-3>", self._show_context_menu)
+
         return txt
+
+    def _on_line_click(self, event):
+        widget = event.widget
+        # Si el usuario ha seleccionado texto (arrastrando), evitamos sobreescribir con el remarcado.
+        if widget.tag_ranges(tk.SEL):
+            return
+
+        index = widget.index(f"@{event.x},{event.y}")
+        line_num = index.split('.')[0]
+        
+        widget.tag_remove("marked_line", "1.0", tk.END)
+        widget.tag_add("marked_line", f"{line_num}.0", f"{line_num}.end")
+
+    def _show_context_menu(self, event):
+        """Muestra el menú contextual de copiar."""
+        self.active_text_widget = event.widget
+        self.context_menu.tk_popup(event.x_root, event.y_root)
+
+    def _copy_text(self):
+        """Copia el texto seleccionado o la línea entera marcada."""
+        if not self.active_text_widget:
+            return
+            
+        try:
+            if self.active_text_widget.tag_ranges(tk.SEL):
+                text_to_copy = self.active_text_widget.get(tk.SEL_FIRST, tk.SEL_LAST)
+            else:
+                ranges = self.active_text_widget.tag_ranges("marked_line")
+                if ranges:
+                    text_to_copy = self.active_text_widget.get(ranges[0], ranges[1])
+                else:
+                    text_to_copy = ""
+                    
+            if text_to_copy:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(text_to_copy)
+        except Exception:
+            pass
 
     # --- Lógica del Pop-up de Intents ---
     def _on_intent_double_click(self, event):
@@ -558,10 +839,17 @@ class ApkAnalyzerApp:
             dialog.update_idletasks()
             x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (dialog.winfo_width() // 2)
             y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (dialog.winfo_height() // 2)
+            x = max(x, 0)
+            y = max(y, 0)
             dialog.geometry(f"+{x}+{y}")
-            
-            dialog.focus_set()
-            
+
+            dialog.deiconify()
+            dialog.lift()
+            dialog.attributes('-topmost', True)
+            dialog.after(150, lambda: dialog.attributes('-topmost', False))
+            dialog.focus_force()
+            dialog.grab_set()
+
         except Exception as e:
             messagebox.showerror("Parse Error", f"Could not load intent details:\n{str(e)}")
 
@@ -570,7 +858,6 @@ if __name__ == "__main__":
     app = ApkAnalyzerApp(root)
     
     if len(sys.argv) > 1:
-        # Dar tiempo a que la GUI se dibuje antes de lanzar el análisis CLI
         root.after(100, lambda: app.start_analysis(sys.argv[1]))
     
     root.mainloop()
