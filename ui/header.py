@@ -6,13 +6,14 @@ from tkinter import ttk
 
 from config import FONT_SUBTITLE, FONT_TITLE
 from utils.optional_deps import HAS_PIL, ImageTk
-from utils.ui_helpers import create_placeholder_icon
+from utils.ui_helpers import PlaceholderIconFactory
 
 
 class AppHeader(ttk.Frame):
-    def __init__(self, parent, on_load_click):
+    def __init__(self, parent, on_load_click, icon_factory: PlaceholderIconFactory = None):
         super().__init__(parent)
-        self._placeholder_icon = create_placeholder_icon()
+        self._icon_factory = icon_factory or PlaceholderIconFactory()
+        self._placeholder_icon = self._icon_factory.create()
         self._current_icon = None
 
         left = ttk.Frame(self)

@@ -8,7 +8,7 @@
             "name": "Python: Pipx Environment",
             "type": "debugpy",
             "request": "launch",
-            "program": "${file}",
+            "program": "main.py",
             "console": "integratedTerminal",
             "python": "/home/gmm/.local/share/pipx/venvs/androguard/bin/python",
             "args": ["/home/gmm/9.3.Alternative.apk"]

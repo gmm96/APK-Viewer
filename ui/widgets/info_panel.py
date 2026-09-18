@@ -5,17 +5,25 @@ components, trackers) as read-only entry fields and scrollable list boxes.
 import tkinter as tk
 from tkinter import ttk
 
-from config import COLOR_MARK_BG, COLOR_TEXT_BG, FONT_MONO_SMALL, LABEL_WIDTH, MIN_LIST_LINES
+from config import COLOR_TEXT_BG, FONT_MONO_SMALL, LABEL_WIDTH, MIN_LIST_LINES
 from ui.context_menu import TextContextMenu
 from ui.scrollable_frame import ScrollableFrame
-from utils.ui_helpers import make_autohide_scroll_command
+from ui.widgets.line_marker import TextLineMarker
+from utils.ui_helpers import AutoHideScrollbar
 
 
 class InfoPanel(ttk.Frame):
-    def __init__(self, parent, context_menu: TextContextMenu, on_intent_double_click):
+    def __init__(
+        self,
+        parent,
+        context_menu: TextContextMenu,
+        on_intent_double_click,
+        line_marker: TextLineMarker = None,
+    ):
         super().__init__(parent)
         self._context_menu = context_menu
         self._on_intent_double_click = on_intent_double_click
+        self._line_marker = line_marker or TextLineMarker()
 
         self.scroll_frame = ScrollableFrame(self)
         self.scroll_frame.pack(expand=True, fill=tk.BOTH)
@@ -39,7 +47,7 @@ class InfoPanel(ttk.Frame):
                 else:
                     self._add_entry_field(frame, inner_row, label, value)
 
-    # --- Field builders ---------------------------------------------------
+    # --- Field builders ------------------------------------------------------
 
     def _add_entry_field(self, parent, row, label_text, value):
         ttk.Label(parent, text=label_text, width=LABEL_WIDTH).grid(row=row, column=0, sticky="w", padx=10, pady=5)
@@ -55,11 +63,7 @@ class InfoPanel(ttk.Frame):
             row=row, column=0, sticky="nw", padx=10, pady=5
         )
 
-        separator = "\n\n" if "Certificates" in label_text else "\n"
-        display_text = separator.join(items) if items else "None found"
-
-        line_count = max(display_text.count("\n") + 1, MIN_LIST_LINES)
-        display_text += "\n" * (line_count - (display_text.count("\n") + 1))
+        display_text, line_count = self._build_display_text(label_text, items)
 
         container = ttk.Frame(parent)
         container.grid(row=row, column=1, sticky="ew", padx=10, pady=5)
@@ -72,34 +76,29 @@ class InfoPanel(ttk.Frame):
             relief="solid", bg=COLOR_TEXT_BG, font=FONT_MONO_SMALL,
         )
         h_scroll = ttk.Scrollbar(container, orient="horizontal", command=text_widget.xview)
-        text_widget.configure(
-            xscrollcommand=make_autohide_scroll_command(h_scroll, {"row": 1, "column": 0, "sticky": "ew"})
-        )
+        autohide = AutoHideScrollbar(h_scroll, {"row": 1, "column": 0, "sticky": "ew"})
+        text_widget.configure(xscrollcommand=autohide.scroll_command)
         text_widget.grid(row=0, column=0, sticky="ew")
 
         text_widget.insert(tk.END, display_text)
         text_widget.configure(state="disabled")
-        text_widget.tag_configure("marked_line", background=COLOR_MARK_BG)
 
-        text_widget.bind("<Button-1>", lambda e: e.widget.tag_remove("marked_line", "1.0", tk.END))
-        text_widget.bind("<ButtonRelease-1>", self._mark_clicked_line)
+        self._line_marker.bind(text_widget)
         self._context_menu.attach(text_widget)
 
         if label_text == "Intent Actions":
             text_widget.bind("<Double-Button-1>", self._handle_intent_double_click)
 
-    # --- Interaction handlers ----------------------------------------------
-
     @staticmethod
-    def _mark_clicked_line(event):
-        widget = event.widget
-        if widget.tag_ranges(tk.SEL):
-            return  # a drag-selection is in progress; don't override it
+    def _build_display_text(label_text: str, items: list):
+        separator = "\n\n" if "Certificates" in label_text else "\n"
+        display_text = separator.join(items) if items else "None found"
 
-        index = widget.index(f"@{event.x},{event.y}")
-        line_num = index.split(".")[0]
-        widget.tag_remove("marked_line", "1.0", tk.END)
-        widget.tag_add("marked_line", f"{line_num}.0", f"{line_num}.end")
+        line_count = max(display_text.count("\n") + 1, MIN_LIST_LINES)
+        display_text += "\n" * (line_count - (display_text.count("\n") + 1))
+        return display_text, line_count
+
+    # --- Interaction handlers -------------------------------------------------
 
     def _handle_intent_double_click(self, event):
         widget = event.widget

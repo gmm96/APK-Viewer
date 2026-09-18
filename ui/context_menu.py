@@ -4,6 +4,8 @@ the app (manifest viewer, list fields, etc.).
 """
 import tkinter as tk
 
+from config import MARKED_LINE_TAG
+
 
 class TextContextMenu:
     """
@@ -32,7 +34,7 @@ class TextContextMenu:
             if widget.tag_ranges(tk.SEL):
                 text_to_copy = widget.get(tk.SEL_FIRST, tk.SEL_LAST)
             else:
-                marked = widget.tag_ranges("marked_line")
+                marked = widget.tag_ranges(MARKED_LINE_TAG)
                 text_to_copy = widget.get(marked[0], marked[1]) if marked else ""
 
             if text_to_copy:

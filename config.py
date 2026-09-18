@@ -27,6 +27,9 @@ COLOR_XML_ATTR = "#FF0000"
 COLOR_XML_VALUE = "#0000FF"
 COLOR_XML_COMMENT = "#008000"
 
+# Tag name shared between the line-marker and the copy context menu
+MARKED_LINE_TAG = "marked_line"
+
 # --- Android manifest namespace ---
 ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
 

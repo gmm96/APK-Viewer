@@ -18,10 +18,10 @@ else:
     ET = None
 
 try:
-    from PIL import Image, ImageTk, ImageDraw
+    from PIL import Image, ImageDraw, ImageTk
     HAS_PIL = True
 except ImportError:
     Image = None
-    ImageTk = None
     ImageDraw = None
+    ImageTk = None
     HAS_PIL = False

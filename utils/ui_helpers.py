@@ -1,5 +1,5 @@
 """
-Small reusable Tkinter UI helpers shared by several widgets.
+Small reusable Tkinter UI helper classes shared by several widgets.
 """
 import tkinter as tk
 from tkinter import ttk
@@ -8,31 +8,41 @@ from config import COLOR_PLACEHOLDER_BG, COLOR_PLACEHOLDER_BORDER, ICON_SIZE
 from utils.optional_deps import HAS_PIL, Image, ImageDraw, ImageTk
 
 
-def create_placeholder_icon():
-    """Build a neutral placeholder image shown before an APK icon is loaded."""
-    if HAS_PIL:
-        img = Image.new("RGB", ICON_SIZE, color=COLOR_PLACEHOLDER_BG)
-        draw = ImageDraw.Draw(img)
-        draw.rectangle(
-            [0, 0, ICON_SIZE[0] - 1, ICON_SIZE[1] - 1],
-            outline=COLOR_PLACEHOLDER_BORDER,
-            width=2,
-        )
-        return ImageTk.PhotoImage(img)
-    return tk.PhotoImage(width=ICON_SIZE[0], height=ICON_SIZE[1])
+class PlaceholderIconFactory:
+    """Builds the neutral placeholder image shown before an APK icon is loaded."""
+
+    def __init__(self, size=ICON_SIZE, bg_color=COLOR_PLACEHOLDER_BG, border_color=COLOR_PLACEHOLDER_BORDER):
+        self._size = size
+        self._bg_color = bg_color
+        self._border_color = border_color
+
+    def create(self):
+        if HAS_PIL:
+            img = Image.new("RGB", self._size, color=self._bg_color)
+            draw = ImageDraw.Draw(img)
+            draw.rectangle(
+                [0, 0, self._size[0] - 1, self._size[1] - 1],
+                outline=self._border_color,
+                width=2,
+            )
+            return ImageTk.PhotoImage(img)
+        return tk.PhotoImage(width=self._size[0], height=self._size[1])
 
 
-def make_autohide_scroll_command(scrollbar: ttk.Scrollbar, grid_kwargs: dict):
+class AutoHideScrollbar:
     """
-    Return a callback suitable for `xscrollcommand` (or `yscrollcommand`) that
-    hides the given scrollbar whenever the whole content is already visible,
-    and re-shows it (re-gridding with `grid_kwargs`) otherwise.
+    Wraps a ttk.Scrollbar so it hides itself (via grid_remove) whenever the
+    whole content is already visible, and re-grids it otherwise. Bind its
+    `scroll_command` method to a widget's xscrollcommand/yscrollcommand.
     """
-    def _on_scroll(first, last):
+
+    def __init__(self, scrollbar: ttk.Scrollbar, grid_kwargs: dict):
+        self._scrollbar = scrollbar
+        self._grid_kwargs = grid_kwargs
+
+    def scroll_command(self, first, last):
         if float(first) <= 0.0 and float(last) >= 1.0:
-            scrollbar.grid_remove()
+            self._scrollbar.grid_remove()
         else:
-            scrollbar.grid(**grid_kwargs)
-        scrollbar.set(first, last)
-
-    return _on_scroll
+            self._scrollbar.grid(**self._grid_kwargs)
+        self._scrollbar.set(first, last)

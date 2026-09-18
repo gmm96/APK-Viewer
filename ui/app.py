@@ -1,30 +1,44 @@
 """
 Main application window: wires together the header, status bar, tabs and
-the background analysis pipeline.
+the background analysis pipeline. This is the composition root for the
+whole app - every non-trivial dependency is created (or accepted) here and
+handed down to the collaborators that need it.
 """
 import os
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from core import apk_service, file_tree_service, manifest_service
+from core import ApkAnalyzer, FileTreeBuilder, ManifestFormatter
+from core.models import AnalysisResult
 from ui.context_menu import TextContextMenu
 from ui.header import AppHeader
 from ui.status_bar import StatusBar
 from ui.widgets.files_panel import FilesPanel
 from ui.widgets.info_panel import InfoPanel
-from ui.widgets.intent_dialog import open_intent_dialog
+from ui.widgets.intent_dialog import IntentDetailsDialog
 from ui.widgets.manifest_panel import ManifestPanel
 
 
 class ApkAnalyzerApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(
+        self,
+        root: tk.Tk,
+        analyzer: ApkAnalyzer = None,
+        manifest_formatter: ManifestFormatter = None,
+        file_tree_builder: FileTreeBuilder = None,
+    ):
         self.root = root
         self.root.title("APKViewer")
         self.root.geometry("1000x750")
 
+        self._analyzer = analyzer or ApkAnalyzer()
+        self._manifest_formatter = manifest_formatter or ManifestFormatter()
+        self._file_tree_builder = file_tree_builder or FileTreeBuilder()
+
         self._configure_style()
         self.context_menu = TextContextMenu(root)
+        self.intent_dialog = IntentDetailsDialog(root)
         self._build_layout()
 
     def _configure_style(self):
@@ -45,7 +59,7 @@ class ApkAnalyzerApp:
         notebook = ttk.Notebook(self.root)
         notebook.pack(expand=True, fill=tk.BOTH, padx=10, pady=(0, 10))
 
-        self.info_panel = InfoPanel(notebook, self.context_menu, on_intent_double_click=self._show_intent_dialog)
+        self.info_panel = InfoPanel(notebook, self.context_menu, on_intent_double_click=self.intent_dialog.open)
         notebook.add(self.info_panel, text="Information")
 
         self.manifest_panel = ManifestPanel(notebook, self.context_menu)
@@ -79,13 +93,13 @@ class ApkAnalyzerApp:
 
         threading.Thread(target=self._analyze_in_background, args=(apk_path,), daemon=True).start()
 
-    # --- Background worker (runs off the Tk main thread) --------------------
+    # --- Background worker (runs off the Tk main thread) ----------------------
 
     def _analyze_in_background(self, apk_path: str):
         try:
-            result = apk_service.analyze(apk_path)
-            manifest_xml = manifest_service.format_manifest(result["apk"])
-            file_tree = file_tree_service.build_file_tree(apk_path)
+            result = self._analyzer.analyze(apk_path)
+            manifest_xml = self._manifest_formatter.format(result.apk)
+            file_tree = self._file_tree_builder.build(apk_path)
 
             self.root.after(0, lambda: self._render_result(result, manifest_xml, file_tree))
             self._set_status("Analysis completed successfully.", "green")
@@ -98,21 +112,18 @@ class ApkAnalyzerApp:
         finally:
             self.root.after(0, lambda: self.header.set_loading_enabled(True))
 
-    # --- UI updates (must run on the Tk main thread) ------------------------
+    # --- UI updates (must run on the Tk main thread) ---------------------------
 
     def _set_status(self, message: str, color: str = "gray"):
         self.root.after(0, lambda: self.status_bar.set_status(message, color))
 
-    def _render_result(self, result: dict, manifest_xml: str, file_tree: dict):
-        app_info = result["sections"].get("App Information", {})
+    def _render_result(self, result: AnalysisResult, manifest_xml: str, file_tree: dict):
+        app_info = result.sections.get("App Information", {})
         self.header.show_result(
             app_name=app_info.get("App name"),
             package_name=app_info.get("Package name"),
-            icon_image=result["icon"],
+            icon_image=result.icon,
         )
-        self.info_panel.render(result["sections"])
+        self.info_panel.render(result.sections)
         self.manifest_panel.render(manifest_xml)
         self.files_panel.set_tree(file_tree)
-
-    def _show_intent_dialog(self, line_text: str):
-        open_intent_dialog(self.root, line_text)
